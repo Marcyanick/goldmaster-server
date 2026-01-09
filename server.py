@@ -8,7 +8,6 @@ app = Flask(__name__)
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-
 def tg_send(text: str):
     if not BOT_TOKEN or not CHAT_ID:
         print("❌ Missing TELEGRAM env vars")
@@ -23,28 +22,18 @@ def tg_send(text: str):
         print("❌ Telegram send error:", str(e))
         return False
 
-
 def parse_tv_payload():
     """
-    Robust parser for TradingView webhooks:
-    - application/json payload
-    - text/plain body containing JSON
-    - {"message":"{...json...}"} wrapper
-    - returns dict (never None)
+    Robust parser for TradingView webhooks.
     """
     payload = request.get_json(silent=True)
-
     if payload is None:
         raw = (request.get_data(as_text=True) or "").strip()
         if raw:
-            # Try parse raw body as JSON
             try:
                 payload = json.loads(raw)
             except Exception:
-                # If it's not JSON, keep it as raw text
                 payload = {"raw": raw}
-
-    # If TradingView (or your alert) wraps data inside "message"
     if isinstance(payload, dict) and isinstance(payload.get("message"), str):
         msg = payload["message"].strip()
         if msg.startswith("{") and msg.endswith("}"):
@@ -52,39 +41,47 @@ def parse_tv_payload():
                 payload = json.loads(msg)
             except Exception:
                 pass
-
     return payload if isinstance(payload, dict) else {}
-
 
 @app.post("/signal")
 def signal():
     payload = parse_tv_payload()
     print("📩 payload:", payload)
 
-    strategy = str(payload.get("strategy", "")).strip()
-    event = str(payload.get("event", "")).strip()
-    symbol = str(payload.get("symbol", payload.get("ticker", ""))).strip()
-    tf = str(payload.get("tf", payload.get("interval", ""))).strip()
-    price = str(payload.get("price", payload.get("close", ""))).strip()
-    t = str(payload.get("time", "")).strip()
+    strategy = str(payload.get("strategy", "")).strip().lower().replace(" ", "")
+    event    = str(payload.get("event", "")).strip()
+    symbol   = str(payload.get("symbol", payload.get("ticker", ""))).strip()
+    tf       = str(payload.get("tf", payload.get("interval", ""))).strip()
+    price    = str(payload.get("price", payload.get("close", ""))).strip()
+    t        = str(payload.get("time", "")).strip()
 
-    # ✅ BYPASS FILTER for GoldMasterFVG: always send Telegram
-    if strategy.lower() == "goldmasterfvg":
-        msg = f"🟡 GoldMasterFVG\n🔔 {event or 'ALERT'}\n📊 {symbol} ({tf})\n💰 {price}\n🕒 {t}"
+    # Flexible detection for FVG strategy
+    is_fvg = "goldmasterfvg" in strategy
+
+    if is_fvg:
+        msg = (
+            f"🟡 GoldMasterFVG\n"
+            f"🔔 {event or 'ALERT'}\n"
+            f"📊 {symbol or '-'} ({tf or '-'})\n"
+            f"💰 {price or '-'}\n"
+            f"🕒 {t or '-'}"
+        )
         sent_ok = tg_send(msg)
         return jsonify({"ok": True, "mode": "FVG", "sent": sent_ok}), 200
 
-    # 👇 Old GoldMaster v6.6 logic (kept)
+    # Old GoldMaster v6.6 logic
     decision = payload.get("decision")
+
     if not decision:
-        return jsonify({"reason": "no decision", "status": "ignored"}), 200
+        raw = json.dumps(payload, indent=2, ensure_ascii=False)[:3500]
+        msg = "🟥 RAW DEBUG (no decision / not FVG)\n\n" + raw
+        sent_ok = tg_send(msg)
+        return jsonify({"ok": True, "mode": "RAW", "sent": sent_ok, "reason": "no decision"}), 200
 
     msg = f"🟦 GoldMaster\n✅ {decision}\n📊 {symbol} ({tf})\n💰 {price}\n🕒 {t}"
     sent_ok = tg_send(msg)
     return jsonify({"ok": True, "mode": "GM", "sent": sent_ok}), 200
 
-
-# Optional: simple health endpoint (handy for debugging)
 @app.get("/")
 def home():
     return "OK", 200
