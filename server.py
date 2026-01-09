@@ -8,7 +8,8 @@ app = Flask(__name__)
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-def tg_send(text: str):
+
+def tg_send(text: str) -> bool:
     if not BOT_TOKEN or not CHAT_ID:
         print("❌ Missing TELEGRAM env vars")
         return False
@@ -22,11 +23,17 @@ def tg_send(text: str):
         print("❌ Telegram send error:", str(e))
         return False
 
-def parse_tv_payload():
+
+def parse_tv_payload() -> dict:
     """
-    Robust parser for TradingView webhooks.
+    Robust parser for TradingView webhooks:
+    - application/json payload
+    - text/plain body containing JSON
+    - {"message":"{...json...}"} wrapper
+    - returns dict (never None)
     """
     payload = request.get_json(silent=True)
+
     if payload is None:
         raw = (request.get_data(as_text=True) or "").strip()
         if raw:
@@ -34,6 +41,7 @@ def parse_tv_payload():
                 payload = json.loads(raw)
             except Exception:
                 payload = {"raw": raw}
+
     if isinstance(payload, dict) and isinstance(payload.get("message"), str):
         msg = payload["message"].strip()
         if msg.startswith("{") and msg.endswith("}"):
@@ -41,46 +49,56 @@ def parse_tv_payload():
                 payload = json.loads(msg)
             except Exception:
                 pass
+
     return payload if isinstance(payload, dict) else {}
+
 
 @app.post("/signal")
 def signal():
     payload = parse_tv_payload()
     print("📩 payload:", payload)
 
-    strategy = str(payload.get("strategy", "")).strip().lower().replace(" ", "")
-    event    = str(payload.get("event", "")).strip()
-    symbol   = str(payload.get("symbol", payload.get("ticker", ""))).strip()
-    tf       = str(payload.get("tf", payload.get("interval", ""))).strip()
-    price    = str(payload.get("price", payload.get("close", ""))).strip()
-    t        = str(payload.get("time", "")).strip()
+    # Detect GoldMasterFVG flexibly
+    strategy = str(payload.get("strategy", "")).strip()
+    strategy_lc = strategy.lower().replace(" ", "")
+    is_fvg = "goldmasterfvg" in strategy_lc
 
-    # Flexible detection for FVG strategy
-    is_fvg = "goldmasterfvg" in strategy
+    if not is_fvg:
+        return jsonify({"ok": True, "ignored": True, "reason": "not GoldMasterFVG"}), 200
 
-    if is_fvg:
-        msg = (
-            f"🟡 GoldMasterFVG\n"
-            f"🔔 {event or 'ALERT'}\n"
-            f"📊 {symbol or '-'} ({tf or '-'})\n"
-            f"💰 {price or '-'}\n"
-            f"🕒 {t or '-'}"
-        )
-        sent_ok = tg_send(msg)
-        return jsonify({"ok": True, "mode": "FVG", "sent": sent_ok}), 200
+    # Extract fields sent by Pine
+    event = str(payload.get("event", "TOUCH")).strip()
+    symbol = str(payload.get("symbol", payload.get("ticker", ""))).strip()
+    ltf = str(payload.get("tf", payload.get("interval", ""))).strip()
+    price = str(payload.get("price", payload.get("close", ""))).strip()
+    t = str(payload.get("time", "")).strip()
 
-    # Old GoldMaster v6.6 logic
-    decision = payload.get("decision")
+    htf = str(payload.get("htf", "")).strip()           # "15" or "60"
+    side = str(payload.get("side", "")).strip()         # "BULL" / "BEAR"
+    mode = str(payload.get("mode", "")).strip()         # "WICK" / "CLOSE"
+    top = str(payload.get("top", "")).strip()
+    bot = str(payload.get("bot", "")).strip()
 
-    if not decision:
-        raw = json.dumps(payload, indent=2, ensure_ascii=False)[:3500]
-        msg = "🟥 RAW DEBUG (no decision / not FVG)\n\n" + raw
-        sent_ok = tg_send(msg)
-        return jsonify({"ok": True, "mode": "RAW", "sent": sent_ok, "reason": "no decision"}), 200
+    # Clean Telegram message (final)
+    msg_lines = [
+        "🟡 Gold Master FVG",
+        f"🔔 {event}",
+        f"📌 HTF: {htf}m | Side: {side} | Mode: {mode}",
+        f"📊 {symbol} (LTF {ltf})",
+        f"💰 Price: {price}",
+    ]
 
-    msg = f"🟦 GoldMaster\n✅ {decision}\n📊 {symbol} ({tf})\n💰 {price}\n🕒 {t}"
+    if top and bot:
+        msg_lines.append(f"🧱 Zone: {bot} → {top}")
+
+    if t:
+        msg_lines.append(f"🕒 {t}")
+
+    msg = "\n".join(msg_lines)
+
     sent_ok = tg_send(msg)
-    return jsonify({"ok": True, "mode": "GM", "sent": sent_ok}), 200
+    return jsonify({"ok": True, "sent": sent_ok}), 200
+
 
 @app.get("/")
 def home():
